@@ -12,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const CALENDAR_IDS = ['090ze4f7QMT41hIqOLMf', 'aWRLojJqN8SeshiBnqTF'];
+const CALENDAR_IDS = ['aWRLojJqN8SeshiBnqTF'];
 
 function getRanges() {
   const now   = new Date();
