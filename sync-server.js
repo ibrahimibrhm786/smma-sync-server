@@ -1,9 +1,7 @@
 /**
- * SMMA Tracker — Sync Server v2
- * GHL API v2 + Meta Ads with form breakdown + daily/weekly/monthly ranges
- *
+ * SMMA Tracker — Sync Server v3
+ * Fixed GHL API v2 endpoint: GET /calendars/events
  * Calendar IDs: 090ze4f7QMT41hIqOLMf, aWRLojJqN8SeshiBnqTF
- * Meta Form:    PPSA ADS1 - CABINETS
  */
 
 const express = require('express');
@@ -14,183 +12,155 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── Your calendar IDs (hardcoded) ──
-const CALENDAR_IDS = [
-  '090ze4f7QMT41hIqOLMf',
-  'aWRLojJqN8SeshiBnqTF'
-];
+const CALENDAR_IDS = ['090ze4f7QMT41hIqOLMf', 'aWRLojJqN8SeshiBnqTF'];
 
-// ── Date range helpers ──
 function getRanges() {
   const now   = new Date();
-  const year  = now.getFullYear();
-  const month = now.getMonth();
-  const date  = now.getDate();
-  const day   = now.getDay(); // 0=Sun
+  const y     = now.getFullYear();
+  const m     = now.getMonth();
+  const d     = now.getDate();
+  const day   = now.getDay();
 
-  // Daily: today
-  const dayStart = new Date(year, month, date, 0, 0, 0);
-  const dayEnd   = new Date(year, month, date, 23, 59, 59);
+  const dayStart   = new Date(y, m, d, 0, 0, 0);
+  const dayEnd     = new Date(y, m, d, 23, 59, 59);
+  const diffToMon  = day === 0 ? 6 : day - 1;
+  const weekStart  = new Date(y, m, d - diffToMon, 0, 0, 0);
+  const monthStart = new Date(y, m, 1, 0, 0, 0);
 
-  // Weekly: Mon–today
-  const diffToMon = (day === 0 ? 6 : day - 1);
-  const weekStart = new Date(year, month, date - diffToMon, 0, 0, 0);
-  const weekEnd   = dayEnd;
-
-  // Monthly: 1st–today
-  const monthStart = new Date(year, month, 1, 0, 0, 0);
-  const monthEnd   = dayEnd;
-
-  const fmt = d => d.toISOString().split('T')[0];
+  const iso = dt => dt.toISOString();
+  const ymd = dt => dt.toISOString().split('T')[0];
 
   return {
-    daily:   { since: fmt(dayStart),   until: fmt(dayEnd),   label: 'Today' },
-    weekly:  { since: fmt(weekStart),  until: fmt(weekEnd),  label: 'This week' },
-    monthly: { since: fmt(monthStart), until: fmt(monthEnd), label: 'This month' },
+    daily:   { since: ymd(dayStart),   until: ymd(dayEnd),   startIso: iso(dayStart),   endIso: iso(dayEnd),   label: 'Today' },
+    weekly:  { since: ymd(weekStart),  until: ymd(dayEnd),   startIso: iso(weekStart),  endIso: iso(dayEnd),   label: 'This week' },
+    monthly: { since: ymd(monthStart), until: ymd(dayEnd),   startIso: iso(monthStart), endIso: iso(dayEnd),   label: 'This month' },
   };
 }
 
-// ── Health check ──
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'smma-sync-server-v2', calendars: CALENDAR_IDS });
+  res.json({ status: 'ok', service: 'smma-sync-server-v3', calendars: CALENDAR_IDS });
 });
 
-// ── POST /sync ──
 app.post('/sync', async (req, res) => {
   const { metaToken, metaAccount, ghlToken, ghlLocation } = req.body;
+  if (!metaToken && !ghlToken) return res.status(400).json({ error: 'No tokens provided' });
 
-  if (!metaToken && !ghlToken) {
-    return res.status(400).json({ error: 'No tokens provided' });
-  }
-
-  const ranges = getRanges();
+  const ranges  = getRanges();
   const results = {};
   const errors  = [];
 
   for (const [period, range] of Object.entries(ranges)) {
     let metaData = {};
-    let ghlData  = {};
+    let ghlData  = { booked: 0, appointments: [] };
 
-    // ── META ADS ──
+    // ── META ──
     if (metaToken && metaAccount) {
       try {
-        const timeRange = encodeURIComponent(JSON.stringify({ since: range.since, until: range.until }));
-        const fields    = 'spend,impressions,clicks,actions';
+        const tr     = encodeURIComponent(JSON.stringify({ since: range.since, until: range.until }));
+        const fields = 'spend,impressions,clicks,actions';
 
-        // 1. Total account spend/leads
-        const totalUrl  = `https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=${fields}&time_range=${timeRange}&access_token=${metaToken}`;
-        const totalRes  = await fetch(totalUrl);
-        const totalJson = await totalRes.json();
-        if (totalJson.error) throw new Error(totalJson.error.message);
+        // Total account
+        const totalR = await fetch(`https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=${fields}&time_range=${tr}&access_token=${metaToken}`);
+        const totalJ = await totalR.json();
+        if (totalJ.error) throw new Error(totalJ.error.message);
+        const d0      = totalJ.data?.[0] || {};
+        const acts    = d0.actions || [];
+        const totalLeads = parseInt(acts.find(a => a.action_type === 'lead')?.value || 0);
 
-        const d       = totalJson.data?.[0] || {};
-        const actions = d.actions || [];
-        const totalLeads = parseInt(actions.find(a => a.action_type === 'lead')?.value || 0);
-
-        // 2. Per-form breakdown — PPSA ADS1 - CABINETS
-        const formUrl  = `https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=${fields},action_values&time_range=${timeRange}&breakdowns=action_type&action_breakdowns=action_type&access_token=${metaToken}`;
-
-        // Simpler: get ad-level breakdown for cabinet form leads
-        const adLevelUrl = `https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=spend,impressions,clicks,actions,ad_name&time_range=${timeRange}&level=ad&access_token=${metaToken}&limit=50`;
-        const adRes      = await fetch(adLevelUrl);
-        const adJson     = await adRes.json();
-
-        let cabinetLeads = 0;
-        let cabinetSpend = 0;
-        if (!adJson.error && adJson.data) {
-          // Filter ads using CABINETS form (ad name contains CABINET)
-          const cabinetAds = adJson.data.filter(ad =>
-            (ad.ad_name || '').toUpperCase().includes('CABINET') ||
-            (ad.ad_name || '').toUpperCase().includes('A1') ||
-            (ad.ad_name || '').toUpperCase().includes('A2') ||
-            (ad.ad_name || '').toUpperCase().includes('A3') ||
-            (ad.ad_name || '').toUpperCase().includes('A4')
-          );
-          cabinetAds.forEach(ad => {
-            const adActions = ad.actions || [];
-            cabinetLeads += parseInt(adActions.find(a => a.action_type === 'lead')?.value || 0);
-            cabinetSpend += parseFloat(ad.spend || 0);
+        // Ad-level for cabinet breakdown
+        const adR = await fetch(`https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=spend,actions,ad_name,adset_name,campaign_name&time_range=${tr}&level=ad&limit=100&access_token=${metaToken}`);
+        const adJ = await adR.json();
+        let cabLeads = 0, cabSpend = 0;
+        if (!adJ.error && adJ.data) {
+          adJ.data.forEach(ad => {
+            const name = (ad.ad_name || ad.adset_name || ad.campaign_name || '').toUpperCase();
+            if (name.includes('CABINET')) {
+              const adActs = ad.actions || [];
+              cabLeads += parseInt(adActs.find(a => a.action_type === 'lead')?.value || 0);
+              cabSpend += parseFloat(ad.spend || 0);
+            }
           });
         }
 
         metaData = {
-          spend:        parseFloat(d.spend || 0),
-          impressions:  parseInt(d.impressions || 0),
-          clicks:       parseInt(d.clicks || 0),
+          spend:        parseFloat(d0.spend || 0),
+          impressions:  parseInt(d0.impressions || 0),
+          clicks:       parseInt(d0.clicks || 0),
           leads:        totalLeads,
-          cabinetLeads: cabinetLeads,
-          cabinetSpend: Math.round(cabinetSpend * 100) / 100,
+          cabinetLeads: cabLeads,
+          cabinetSpend: Math.round(cabSpend * 100) / 100,
         };
-
-        console.log(`[Meta ${period}] spend=$${metaData.spend} leads=${metaData.leads} cabinetLeads=${metaData.cabinetLeads}`);
+        console.log(`[Meta ${period}] spend=$${metaData.spend} leads=${metaData.leads} cabLeads=${cabLeads}`);
       } catch (e) {
         errors.push(`Meta ${period}: ${e.message}`);
-        console.error(`[Meta ${period}] Error:`, e.message);
+        console.error(`[Meta ${period}]`, e.message);
       }
     }
 
-    // ── GHL API v2 ──
+    // ── GHL v2 ──
     if (ghlToken && ghlLocation) {
-      try {
-        const startIso = new Date(range.since + 'T00:00:00.000Z').toISOString();
-        const endIso   = new Date(range.until + 'T23:59:59.999Z').toISOString();
+      let allAppts = [];
 
-        let allAppts = [];
+      for (const calId of CALENDAR_IDS) {
+        try {
+          // Correct GHL v2 endpoint with epoch ms timestamps
+          const startMs = new Date(range.startIso).getTime();
+          const endMs   = new Date(range.endIso).getTime();
 
-        // Fetch appointments for each calendar
-        for (const calId of CALENDAR_IDS) {
-          const url = `https://services.leadconnectorhq.com/calendars/events?locationId=${ghlLocation}&calendarId=${calId}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&includeAll=true`;
+          const url = `https://services.leadconnectorhq.com/calendars/events?locationId=${ghlLocation}&calendarId=${calId}&startTime=${startMs}&endTime=${endMs}`;
+          console.log(`[GHL ${period}] Fetching: ${url}`);
 
           const r = await fetch(url, {
             headers: {
               'Authorization': `Bearer ${ghlToken}`,
               'Content-Type':  'application/json',
-              'Version':       '2021-04-15'
+              'Version':       '2023-02-21',
             }
           });
-          const json = await r.json();
 
-          if (json.events) {
-            allAppts = allAppts.concat(json.events);
-          } else if (json.appointments) {
-            allAppts = allAppts.concat(json.appointments);
-          }
+          const text = await r.text();
+          console.log(`[GHL ${period}] cal=${calId} status=${r.status} body=${text.slice(0, 300)}`);
 
-          console.log(`[GHL ${period}] calId=${calId} found=${json.events?.length || json.appointments?.length || 0}`);
+          let json;
+          try { json = JSON.parse(text); } catch(e) { throw new Error('Invalid JSON: ' + text.slice(0,100)); }
+
+          if (!r.ok) throw new Error(json.message || json.error || `HTTP ${r.status}`);
+
+          const events = json.events || json.appointments || json.data || [];
+          allAppts = allAppts.concat(events);
+        } catch (e) {
+          errors.push(`GHL ${period} cal=${calId}: ${e.message}`);
+          console.error(`[GHL ${period}] cal=${calId}`, e.message);
         }
-
-        // Deduplicate by id
-        const seen = new Set();
-        allAppts = allAppts.filter(a => {
-          if (seen.has(a.id)) return false;
-          seen.add(a.id); return true;
-        });
-
-        const booked = allAppts.length;
-
-        ghlData = {
-          booked,
-          appointments: allAppts.map(a => ({
-            id:        a.id,
-            title:     a.title || a.contactName || 'Appointment',
-            contact:   a.contactName || a.contact?.name || '',
-            email:     a.email || a.contact?.email || '',
-            phone:     a.phone || a.contact?.phone || '',
-            startTime: a.startTime || a.start_time || a.scheduledAt,
-            calendarId:a.calendarId || a.calendar_id,
-            status:    a.appointmentStatus || a.status || 'booked',
-          }))
-        };
-
-        console.log(`[GHL ${period}] total booked=${booked}`);
-      } catch (e) {
-        errors.push(`GHL ${period}: ${e.message}`);
-        console.error(`[GHL ${period}] Error:`, e.message);
       }
+
+      // Deduplicate
+      const seen = new Set();
+      allAppts = allAppts.filter(a => {
+        const id = a.id || a._id;
+        if (!id || seen.has(id)) return false;
+        seen.add(id); return true;
+      });
+
+      ghlData = {
+        booked: allAppts.length,
+        appointments: allAppts.map(a => ({
+          id:         a.id || a._id,
+          title:      a.title || '',
+          contact:    a.contactName || a.contact?.name || a.title || 'Unknown',
+          email:      a.email || a.contact?.email || '',
+          phone:      a.phone || a.contact?.phone || '',
+          startTime:  a.startTime || a.start_time || a.scheduledAt || '',
+          calendarId: a.calendarId || a.calendar_id || '',
+          status:     a.appointmentStatus || a.status || 'booked',
+        }))
+      };
+
+      console.log(`[GHL ${period}] total=${ghlData.booked} appts`);
     }
 
     results[period] = {
-      label:        ranges[period].label,
+      label:        range.label,
       since:        range.since,
       until:        range.until,
       spend:        metaData.spend        || 0,
@@ -199,15 +169,13 @@ app.post('/sync', async (req, res) => {
       leads:        metaData.leads        || 0,
       cabinetLeads: metaData.cabinetLeads || 0,
       cabinetSpend: metaData.cabinetSpend || 0,
-      booked:       ghlData.booked        || 0,
-      appointments: ghlData.appointments  || [],
+      booked:       ghlData.booked,
+      appointments: ghlData.appointments,
     };
   }
 
-  return res.json({ ok: true, results, errors: errors.length ? errors : undefined });
+  res.json({ ok: true, results, errors: errors.length ? errors : undefined });
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`SMMA Sync Server v2 running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`SMMA Sync Server v3 on port ${PORT}`));
