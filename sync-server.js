@@ -56,11 +56,13 @@ app.post('/sync', async (req, res) => {
     // ── META ──
     if (metaToken && metaAccount) {
       try {
-        const tr     = encodeURIComponent(JSON.stringify({ since: range.since, until: range.until }));
+        const timeRangeObj = JSON.stringify({ since: range.since, until: range.until });
         const fields = 'spend,impressions,clicks,actions';
 
         // Total account
-        const totalR = await fetch(`https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=${fields}&time_range=${tr}&access_token=${metaToken}`);
+        const totalUrl = `https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=${fields}&time_range=${encodeURIComponent(timeRangeObj)}&access_token=${metaToken}`;
+        console.log(`[Meta ${period}] URL: ${totalUrl.replace(metaToken,'***')}`);
+        const totalR = await fetch(totalUrl);
         const totalJ = await totalR.json();
         if (totalJ.error) throw new Error(totalJ.error.message);
         const d0      = totalJ.data?.[0] || {};
@@ -68,7 +70,7 @@ app.post('/sync', async (req, res) => {
         const totalLeads = parseInt(acts.find(a => a.action_type === 'lead')?.value || 0);
 
         // Ad-level for cabinet breakdown
-        const adR = await fetch(`https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=spend,actions,ad_name,adset_name,campaign_name&time_range=${tr}&level=ad&limit=100&access_token=${metaToken}`);
+        const adR = await fetch(`https://graph.facebook.com/v19.0/${metaAccount}/insights?fields=spend,actions,ad_name,adset_name,campaign_name&time_range=${encodeURIComponent(timeRangeObj)}&level=ad&limit=100&access_token=${metaToken}`);
         const adJ = await adR.json();
         let cabLeads = 0, cabSpend = 0;
         if (!adJ.error && adJ.data) {
